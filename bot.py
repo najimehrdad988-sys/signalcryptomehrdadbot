@@ -1,10 +1,14 @@
 import requests
 import time
 import os
+from telegram import Update
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext, ConversationHandler
 
-TELEGRAM_TOKEN = os.getenv("8458321601:AAHwxoNqSQIN_WSQZyC_8IDVFOkZ0c-pEho")
-CHAT_ID = os.getenv("8458321601")
+# مراحل ثبت نام
+NAME, PHONE = range(2)
+users = {}  # ذخیره کاربران ثبت‌نام شده
 
+# ارزها و سطوح
 SYMBOLS = {
     "BTCUSDT": {"support": 24150, "resistance": 24500},
     "ETHUSDT": {"support": 1750, "resistance": 1800},
@@ -13,10 +17,31 @@ SYMBOLS = {
     "DOGEUSDT": {"support": 0.08, "resistance": 0.085}
 }
 
+# ثبت نام
+def start(update: Update, context: CallbackContext):
+    update.message.reply_text("سلام! لطفا نام و نام خانوادگی خودت را وارد کن:")
+    return NAME
+
+def get_name(update: Update, context: CallbackContext):
+    users[update.message.chat_id] = {"name": update.message.text}
+    update.message.reply_text("خیلی خوب! حالا شماره تماس خودت را وارد کن:")
+    return PHONE
+
+def get_phone(update: Update, context: CallbackContext):
+    users[update.message.chat_id]["phone"] = update.message.text
+    update.message.reply_text("✅ ثبت نام با موفقیت انجام شد! حالا سیگنال‌ها را دریافت می‌کنی.")
+    return ConversationHandler.END
+
+def cancel(update: Update, context: CallbackContext):
+    update.message.reply_text("❌ ثبت نام لغو شد.")
+    return ConversationHandler.END
+
+# توابع سیگنال
 def send_to_telegram(message):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    data = {"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML"}
-    requests.post(url, data=data)
+    for chat_id in users.keys():  # فقط به کاربران ثبت‌نام شده
+        url = f"https://api.telegram.org/bot{os.getenv('TELEGRAM_TOKEN')}/sendMessage"
+        data = {"chat_id": chat_id, "text": message, "parse_mode": "HTML"}
+        requests.post(url, data=data)
 
 def get_price(symbol):
     url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
@@ -26,7 +51,7 @@ def get_price(symbol):
 def get_klines(symbol, interval="1m", limit=50):
     url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
     data = requests.get(url).json()
-    closes = [float(item[4]) for item in data]  # قیمت بسته شدن
+    closes = [float(item[4]) for item in data]
     return closes
 
 def EMA(prices, period):
@@ -59,20 +84,16 @@ def check_signals():
         ema_short = EMA(closes, 7)
         ema_long = EMA(closes, 25)
         rsi = RSI(closes)
-
         message = f"<b>{symbol}</b>\nقیمت فعلی: {price}\nEMA7: {ema_short:.2f}, EMA25: {ema_long:.2f}\nRSI: {rsi:.2f}"
 
-        # سیگنال خرید
         if price <= levels["support"] and ema_short > ema_long and rsi < 30:
             send_to_telegram("📊 خرید " + message + " 🚀")
-        # سیگنال فروش
         elif price >= levels["resistance"] and ema_short < ema_long and rsi > 70:
             send_to_telegram("📉 فروش " + message + " 🔻")
-        # هشدار نوسان شدید
-        elif abs(price - closes[-2])/closes[-2] > 0.01:  # تغییر >1%
+        elif abs(price - closes[-2])/closes[-2] > 0.01:
             send_to_telegram("⚠️ نوسان شدید " + message)
 
-if __name__ == "__main__":
+def run_signals(updater):
     while True:
         try:
             check_signals()
@@ -80,3 +101,29 @@ if __name__ == "__main__":
         except Exception as e:
             send_to_telegram(f"⚠️ خطا در ربات: {e}")
             time.sleep(60)
+
+def main():
+    updater = Updater(os.getenv('TELEGRAM_TOKEN'))
+    dp = updater.dispatcher
+
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler('start', start)],
+        states={
+            NAME: [MessageHandler(Filters.text & ~Filters.command, get_name)],
+            PHONE: [MessageHandler(Filters.text & ~Filters.command, get_phone)]
+        },
+        fallbacks=[CommandHandler('cancel', cancel)]
+    )
+
+    dp.add_handler(conv_handler)
+    updater.start_polling()
+
+    # اجرای سیگنال‌ها در پس‌زمینه
+    import threading
+    t = threading.Thread(target=run_signals, args=(updater,))
+    t.start()
+
+    updater.idle()
+
+if __name__ == '__main__':
+    main()
